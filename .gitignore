@@ -30,3 +30,7 @@ coverage/
 # Misc
 *.log
 npm-debug.log*
+
+# Agent
+ref/
+tmp/
