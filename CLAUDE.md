@@ -317,7 +317,7 @@ Colors are defined as CSS variables in `src/index.css` and mapped to Tailwind cu
 
 | Parameter | Value |
 |-----------|-------|
-| Base font size | 14px |
+| Base font size | 16px |
 | Line height | 1.5 |
 | Card padding | 16px (`p-4`) |
 | Section gap | 16px (`gap-4`) |
