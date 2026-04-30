@@ -11,6 +11,8 @@
 - **Testing**: Vitest + React Testing Library
 - **State management**: React context + hooks first; only add Zustand/Jotai if context gets painful
 - **Routing**: React Router v6+
+- **Markdown rendering**: `react-markdown` + `remark-gfm`
+- **Code highlighting**: Shiki (preferred) — never render a code block without syntax highlighting
 
 ## File & Folder Structure
 
@@ -381,3 +383,182 @@ Available in `src/components/ui/`:
 - **Skeleton** — Content loading placeholder with pulse animation
 - **Toast** — Top-right notification, auto-dismiss 3s, supports success/error/warning
 - **EmptyState** — Centered icon + description + action button for empty lists
+- **CodeBlock** — Syntax-highlighted code block (see "Code Block Rendering" below). Use `<CodeBlock>` whenever you need to display code — never hand-roll `<pre><code>`.
+
+---
+
+# Code Block Rendering & Syntax Highlighting
+
+> **Hard rule**: any time the UI displays code — Markdown output, AI chat responses, docs pages, README viewers, snippet cards, diff views, inline help — it **must** be syntax-highlighted from the very first render. Never ship a plain `<pre><code>` with raw text, "we'll add highlighting later" is not acceptable.
+
+## When this rule applies
+
+Trigger this setup on the **first** task that introduces any of:
+
+- Rendering Markdown (`react-markdown`, MDX, a docs viewer, a README page)
+- Showing LLM / AI / chat responses that may contain fenced code blocks
+- Displaying user-submitted or server-returned source code (snippets, gists, logs with code)
+- Any component named like `CodeBlock`, `Snippet`, `Pre`, `Highlight`, `MarkdownRenderer`, `MessageBubble`, `DocsContent`
+
+If the task mentions any of the above, **install highlighting in the same change** as the renderer — not in a follow-up.
+
+## Library choice
+
+**Default: [Shiki](https://shiki.style/)** (uses VS Code TextMate grammars, ships accurate highlighting, supports dual themes).
+
+```bash
+npm i shiki
+# If rendering markdown:
+npm i react-markdown remark-gfm
+```
+
+Fallbacks (only if Shiki is explicitly undesirable, e.g. hard bundle-size constraint):
+
+- `react-syntax-highlighter` (Prism-based, easier API, larger bundle)
+- `highlight.js` + `rehype-highlight` (lightest, less accurate for edge languages)
+
+Do **not** mix multiple highlighters in the same project.
+
+## Required implementation
+
+### 1. `CodeBlock` component — the single entry point
+
+Put it at `src/components/ui/CodeBlock/CodeBlock.tsx`. Every code-rendering surface routes through it.
+
+```tsx
+// src/components/ui/CodeBlock/CodeBlock.tsx
+import { useEffect, useState } from 'react';
+import { codeToHtml } from 'shiki';
+import { cn } from '@/lib/utils';
+
+export interface CodeBlockProps {
+  code: string;
+  lang?: string;              // e.g. 'ts', 'tsx', 'bash', 'json'. Defaults to 'text'.
+  className?: string;
+  showCopy?: boolean;         // default true
+}
+
+export function CodeBlock({ code, lang = 'text', className, showCopy = true }: CodeBlockProps) {
+  const [html, setHtml] = useState<string>('');
+
+  useEffect(() => {
+    let cancelled = false;
+    codeToHtml(code, {
+      lang: normalizeLang(lang),
+      themes: { light: 'github-light', dark: 'github-dark' },
+      defaultColor: false,    // emit both themes, toggle via CSS vars
+    }).then((out) => {
+      if (!cancelled) setHtml(out);
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [code, lang]);
+
+  return (
+    <div className={cn('relative group rounded-md border border-[--color-border] overflow-hidden', className)}>
+      {showCopy && <CopyButton text={code} />}
+      {/* Shiki returns a <pre> with inline styles; we only add layout */}
+      <div
+        className="text-sm [&>pre]:!bg-transparent [&>pre]:p-4 [&>pre]:overflow-x-auto font-mono"
+        // html is produced by Shiki from a known string; safe.
+        dangerouslySetInnerHTML={{ __html: html || fallbackPre(code) }}
+      />
+    </div>
+  );
+}
+
+function fallbackPre(code: string) {
+  // Rendered only for the first paint before Shiki resolves.
+  // Still uses <pre> + mono font so layout doesn't shift.
+  const escaped = code
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;');
+  return `<pre class="p-4 overflow-x-auto"><code>${escaped}</code></pre>`;
+}
+
+function normalizeLang(lang: string) {
+  const map: Record<string, string> = {
+    js: 'javascript', ts: 'typescript', jsx: 'javascript', tsx: 'tsx',
+    sh: 'bash', shell: 'bash', zsh: 'bash',
+    yml: 'yaml', md: 'markdown',
+  };
+  return map[lang.toLowerCase()] ?? lang.toLowerCase();
+}
+```
+
+Rules baked into this component:
+
+- **Dual-theme output** (`github-light` + `github-dark`), driven by the same `.dark` class the rest of the app uses. Never hardcode a single theme.
+- **Language normalization** — accept common aliases (`ts`, `sh`, `yml`) without forcing callers to know Shiki's internal names.
+- **Fallback `<pre>`** renders synchronously with the correct font/padding so there's no layout shift while Shiki loads.
+- **Copy button** is on by default; users expect it.
+- **Export a barrel**: `src/components/ui/CodeBlock/index.ts` → `export * from './CodeBlock';`.
+
+### 2. Markdown integration — wire it up the first time you render Markdown
+
+```tsx
+// src/components/ui/Markdown/Markdown.tsx
+import ReactMarkdown from 'react-markdown';
+import remarkGfm from 'remark-gfm';
+import { CodeBlock } from '@/components/ui/CodeBlock';
+
+export function Markdown({ children }: { children: string }) {
+  return (
+    <ReactMarkdown
+      remarkPlugins={[remarkGfm]}
+      components={{
+        code({ inline, className, children, ...props }) {
+          const match = /language-(\w+)/.exec(className ?? '');
+          const code = String(children).replace(/\n$/, '');
+          if (inline) {
+            return (
+              <code className="px-1 py-0.5 rounded bg-[--color-bg] font-mono text-[0.9em]" {...props}>
+                {children}
+              </code>
+            );
+          }
+          return <CodeBlock code={code} lang={match?.[1] ?? 'text'} />;
+        },
+      }}
+    >
+      {children}
+    </ReactMarkdown>
+  );
+}
+```
+
+Every new Markdown-rendering feature (chat message, docs page, post body, changelog) **must** use `<Markdown>` — do not call `react-markdown` directly elsewhere, or the `code` override is easy to forget.
+
+### 3. Streaming / AI chat responses
+
+If code blocks stream in token-by-token:
+
+- Render the partial text through the same `<CodeBlock>` — Shiki re-highlights on each `code` change; for long blocks debounce re-highlighting at ~60ms.
+- Do **not** wait for the stream to finish before highlighting — half-highlighted is still better than none.
+
+### 4. Styling contract
+
+- `CodeBlock` respects the design tokens in "UI Design System" — border uses `--color-border`, surface blends into `--color-surface`.
+- Font: `font-mono` (system mono stack from the typography section).
+- Rounded: `rounded-md` (matches cards/buttons).
+- No box shadow, no gradient — stay consistent with the GitHub-style flat look.
+
+## Anti-patterns — reject these on sight
+
+- Shipping `<pre><code>{code}</code></pre>` with a TODO comment.
+- Rendering `react-markdown` without overriding the `code` component.
+- Hardcoding a single theme (e.g. only dark) when the app has light/dark toggle.
+- Importing Shiki's full bundle on the server for every request without caching — use `createHighlighter` with a scoped language list if SSR bundle size matters.
+- Using `dangerouslySetInnerHTML` with **unsanitized** HTML from user input — only Shiki's output (from a known string) is safe. For user-provided Markdown, rely on `react-markdown`'s sanitization, never bypass it.
+
+## Checklist before calling a code-rendering task "done"
+
+- [ ] A `CodeBlock` (or equivalent) component exists and is the single entry point.
+- [ ] Light **and** dark themes both render correctly.
+- [ ] At least `ts`, `tsx`, `js`, `jsx`, `json`, `bash`, `css`, `html`, `md` highlight correctly.
+- [ ] Unknown / missing language falls back to plain mono text **without crashing**.
+- [ ] Copy button works and shows feedback.
+- [ ] Markdown renderer routes fenced code through `CodeBlock`.
+- [ ] No layout shift between first paint and highlighted paint.
